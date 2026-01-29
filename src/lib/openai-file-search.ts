@@ -467,11 +467,12 @@ export async function syncOpenAIForSelection(client: OpenAI, selection: SyncSele
 export function buildFileSearchFilters(selection: SyncSelectionParams) {
   const filters: Array<{ type: "eq"; key: string; value: string | number | boolean }> = [
     { type: "eq", key: "group", value: "script" },
+    // Always allow non-year PDFs (coursebooks/formula sheets/etc).
+    { type: "eq", key: "group", value: "pdf" },
   ];
   if (selection.handbookFile) filters.push({ type: "eq", key: "relPath", value: selection.handbookFile });
   if (selection.rulesFile) filters.push({ type: "eq", key: "relPath", value: selection.rulesFile });
-  if (!selection.handbookFile && !selection.rulesFile && selection.year) {
-    filters.push({ type: "eq", key: "year", value: selection.year });
-  }
+  // If a year is selected, include year-tagged docs (handbooks/rules/etc) without excluding non-year PDFs above.
+  if (selection.year) filters.push({ type: "eq", key: "year", value: selection.year });
   return { type: "or" as const, filters };
 }

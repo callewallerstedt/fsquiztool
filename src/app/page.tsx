@@ -57,6 +57,13 @@ type FsQuizQuestion = {
   solution?: Array<{ solution_id: number; text: string }>;
 };
 
+type FsQuizQuestionInfo = {
+  question_id?: number | string;
+  text?: string;
+  time?: number | null;
+  type?: string;
+};
+
 type FsQuizContext = {
   questionId: string;
   questionText: string;
@@ -66,6 +73,13 @@ type FsQuizContext = {
 
 type AssistantBubbleProps = {
   content: string;
+};
+
+type FsQuizLookupMatch = {
+  questionId: number;
+  score: number;
+  text: string;
+  imageUrls: string[];
 };
 
 function makeId() {
@@ -233,6 +247,7 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [idMode, setIdMode] = useState<"answer" | "explain" | null>(null);
+  const [lookupMode, setLookupMode] = useState(false);
   const [idLookupValue, setIdLookupValue] = useState("");
   const [idLookupBusy, setIdLookupBusy] = useState(false);
   const [fsQuizContext, setFsQuizContext] = useState<FsQuizContext | null>(null);
@@ -450,10 +465,12 @@ export default function Home() {
     return () => cancelAnimationFrame(raf);
   }, [messages, busy]);
 
-  const canSend = useMemo(
-    () => (input.trim().length > 0 || pendingImages.length > 0) && !busy,
-    [input, pendingImages.length, busy],
-  );
+  const canSend = useMemo(() => {
+    if (busy) return false;
+    if (idMode) return false;
+    if (lookupMode) return input.trim().length > 0 || pendingImages.length > 0;
+    return input.trim().length > 0 || pendingImages.length > 0;
+  }, [input, pendingImages.length, busy, idMode, lookupMode]);
 
   const renderedMessages = useMemo(() => {
     if (showAllMessages) return messages;
@@ -488,6 +505,7 @@ export default function Home() {
     setPreviousResponseId(null);
     setError(null);
     setIdMode(null);
+    setLookupMode(false);
     setIdLookupValue("");
     setFsQuizContext(null);
     setOpenSource(null);
@@ -503,9 +521,9 @@ export default function Home() {
       .replaceAll("\n", " ")
       .trim();
 
-  const formatApiQuestionMarkdown = (question: FsQuizQuestion) => {
+  const formatApiQuestionMarkdown = (question: FsQuizQuestion, info?: FsQuizQuestionInfo | null) => {
     const questionId = (question?.question_id ?? "").toString().trim();
-    const questionText = (question?.text ?? "").trim();
+    const questionText = (question?.text ?? info?.text ?? "").trim();
 
     const allAnswers = Array.isArray(question?.answers) ? question!.answers : [];
     const correctAnswers = allAnswers.filter((a) => a.is_correct);
@@ -528,6 +546,16 @@ export default function Home() {
       if (questionText) lines.push(questionText);
     }
 
+    if (info && (info.type || info.time != null)) {
+      const infoLines: string[] = [];
+      if (info.type) infoLines.push(`- Type: ${info.type}`);
+      if (info.time != null) infoLines.push(`- Time: ${info.time}s`);
+      if (infoLines.length) {
+        lines.push("\n### Info");
+        for (const l of infoLines) lines.push(l);
+      }
+    }
+
     if (correctAnswers.length) {
       lines.push("\n### Correct answer");
       for (const a of correctAnswers) lines.push(`- ${escapeMdCell(a.answer_text)}`);
@@ -548,6 +576,103 @@ export default function Home() {
     }
 
     return lines.join("\n\n").trim();
+  };
+
+  const formatLookupResultsMarkdown = (opts: {
+    questions: Array<{ question: FsQuizQuestion; info?: FsQuizQuestionInfo | null }>;
+    hadMatches: boolean;
+  }) => {
+    if (!opts.hadMatches) return "_No good matches found._";
+    if (!opts.questions.length) return "_Matches found, but could not fetch question details._";
+    return opts.questions.map((q) => formatApiQuestionMarkdown(q.question, q.info)).join("\n\n");
+  };
+
+  const lookupQuestions = async (query: string, images: ChatImage[]) => {
+    const trimmed = query.trim();
+    if (!trimmed && images.length === 0) return;
+    if (busy || idLookupBusy) return;
+
+    setError(null);
+    setBusy(true);
+
+    const assistantId = makeId();
+    const assistantMsg: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: images.length ? "_Extracting text + searching FS-Quiz…_" : "_Searching FS-Quiz…_",
+      sources: [],
+    };
+    const userMsg: ChatMessage = { id: makeId(), role: "user", content: trimmed || "(image)", images };
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
+
+    const updateAssistant = (content: string) => {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === assistantId && m.role === "assistant" ? { ...m, content } : m)),
+      );
+    };
+
+    try {
+      const res = await fetch("/api/fsquiz/lookup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          query: trimmed,
+          images: images.map((i) => i.dataUrl),
+        }),
+      });
+
+      const data = (await res.json().catch(() => null)) as
+        | {
+            ok: true;
+            complete: boolean;
+            indexedCount: number;
+            newlyIndexed: number;
+            queryUsed: string;
+            extractedText: string;
+            matches: FsQuizLookupMatch[];
+            debugMatch?: { questionId: number; score: number; text: string } | null;
+          }
+        | { ok: false; error?: string }
+        | null;
+
+      if (!res.ok || !data || !("ok" in data) || data.ok !== true) {
+        const msg = (data && "error" in data && data.error) || `Lookup failed (${res.status}).`;
+        updateAssistant(`**Lookup error:** ${msg}`);
+        return;
+      }
+
+      const matches = data.matches ?? [];
+      if (!matches.length) {
+        const stats = `\n\n_Indexed ${data.indexedCount} question(s), +${data.newlyIndexed} this run._`;
+        const debugLine = data.debugMatch
+          ? `\n\n_Debug best match: ID ${data.debugMatch.questionId} (score ${data.debugMatch.score.toFixed(3)})_\n${data.debugMatch.text}`
+          : "";
+        updateAssistant(`${formatLookupResultsMarkdown({ questions: [], hadMatches: false })}${stats}${debugLine}`);
+        return;
+      }
+
+      const questions: Array<{ question: FsQuizQuestion; info?: FsQuizQuestionInfo | null }> = [];
+      for (const m of matches.slice(0, 1)) {
+        try {
+          const qRes = await fetch(`/api/fsquiz/question/${m.questionId}`, { method: "GET" });
+          const qData = (await qRes.json().catch(() => null)) as
+            | { ok: true; question: FsQuizQuestion; info?: FsQuizQuestionInfo | null }
+            | { ok: false; error?: string }
+            | null;
+          if (!qRes.ok || !qData || !("ok" in qData) || qData.ok !== true) continue;
+          questions.push({ question: qData.question, info: qData.info ?? null });
+        } catch {
+          // ignore
+        }
+      }
+
+      const base = formatLookupResultsMarkdown({ questions, hadMatches: true });
+      updateAssistant(base);
+    } catch (e) {
+      updateAssistant(`**Lookup error:** ${e instanceof Error ? e.message : "Lookup failed."}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const sendChatRequest = async (opts: {
@@ -748,7 +873,7 @@ export default function Home() {
     try {
       const res = await fetch(`/api/fsquiz/question/${id}`, { method: "GET" });
       const data = (await res.json()) as
-        | { ok: true; question: FsQuizQuestion }
+        | { ok: true; question: FsQuizQuestion; info?: FsQuizQuestionInfo | null }
         | { ok: false; error?: string };
 
       if (!("ok" in data) || data.ok !== true) {
@@ -778,7 +903,7 @@ export default function Home() {
         imageUrls,
       });
 
-      const md = formatApiQuestionMarkdown(data.question);
+      const md = formatApiQuestionMarkdown(data.question, data.info ?? null);
       setMessages((prev) => [...prev, { id: makeId(), role: "assistant", content: md, sources: [] }]);
       setIdMode(null);
       setIdLookupValue("");
@@ -826,6 +951,14 @@ export default function Home() {
     const question = input.trim();
     if ((!question && pendingImages.length === 0) || busy) return;
     const imagesToSend = [...pendingImages];
+
+    if (lookupMode) {
+      setInput("");
+      setPendingImages([]);
+      setError(null);
+      await lookupQuestions(question, imagesToSend);
+      return;
+    }
 
     setInput("");
     setPendingImages([]);
@@ -1245,7 +1378,10 @@ export default function Home() {
                       ? "border-white/25 bg-white/10 text-white"
                       : "border-white/10 bg-transparent text-white/80 hover:bg-white/5 hover:text-white",
                   ].join(" ")}
-                  onClick={() => setIdMode((v) => (v === "answer" ? null : "answer"))}
+                  onClick={() => {
+                    setLookupMode(false);
+                    setIdMode((v) => (v === "answer" ? null : "answer"));
+                  }}
                   disabled={busy || idLookupBusy}
                 >
                   Get answer
@@ -1258,10 +1394,29 @@ export default function Home() {
                       ? "border-white/25 bg-white/10 text-white"
                       : "border-white/10 bg-transparent text-white/80 hover:bg-white/5 hover:text-white",
                   ].join(" ")}
-                  onClick={() => setIdMode((v) => (v === "explain" ? null : "explain"))}
+                  onClick={() => {
+                    setLookupMode(false);
+                    setIdMode((v) => (v === "explain" ? null : "explain"));
+                  }}
                   disabled={busy || idLookupBusy}
                 >
                   Explain
+                </button>
+                <button
+                  type="button"
+                  className={[
+                    "h-7 rounded-md border px-1 text-xs font-semibold disabled:opacity-40",
+                    lookupMode
+                      ? "border-white/25 bg-white/10 text-white"
+                      : "border-white/10 bg-transparent text-white/80 hover:bg-white/5 hover:text-white",
+                  ].join(" ")}
+                  onClick={() => {
+                    setIdMode(null);
+                    setLookupMode((v) => !v);
+                  }}
+                  disabled={busy || idLookupBusy}
+                >
+                  Lookup
                 </button>
               </div>
 
@@ -1285,7 +1440,11 @@ export default function Home() {
                 ) : (
                   <textarea
                     className="min-h-10 flex-1 resize-none rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/40 focus:ring-2 focus:ring-white/20"
-                    placeholder="Write your question..."
+                    placeholder={
+                      lookupMode
+                        ? "Lookup: paste question text or a screenshot to find the FS-Quiz ID…"
+                        : "Write your question... (Shift+Enter for newline)"
+                    }
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onPaste={(e) => {

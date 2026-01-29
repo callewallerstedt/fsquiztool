@@ -1,17 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { zodResponseFormat } from "openai/helpers/zod";
-import type { ChatCompletionContentPart } from "openai/resources/chat/completions";
 import type { ResponseIncludable } from "openai/resources/responses/responses";
 import { getOpenAIClient } from "@/lib/openai";
-import {
-  buildFileSearchFilters,
-  getVectorStoreId,
-  type SyncSelectionParams,
-} from "@/lib/openai-file-search";
+import { getVectorStoreId } from "@/lib/openai-file-search";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
+
+const MAX_IMAGE_DATA_URL_CHARS = 4_000_000;
 
 const ReqSchema = z
   .object({
@@ -57,18 +53,6 @@ const ReqSchema = z
     message: "Provide a question or at least one image.",
   });
 
-const VisionSchema = z.object({
-  summary: z.string(),
-  keywords: z.array(z.string()).max(12),
-});
-
-const VisionStatementsSchema = z.object({
-  statements: z.array(z.string()).min(1).max(12),
-  keywords: z.array(z.string()).max(18).default([]),
-  concepts: z.array(z.string()).max(24).default([]),
-  searchQueries: z.array(z.string()).max(12).default([]),
-});
-
 type SourceRef = {
   chunkId: string;
   title: string;
@@ -76,6 +60,19 @@ type SourceRef = {
   excerpt: string;
   externalUrl?: string;
 };
+
+function buildRestrictedFilters(opts: {
+  handbookFile?: string;
+  rulesFile?: string;
+}) {
+  const filters: Array<{ type: "eq"; key: string; value: string | number | boolean }> = [
+    { type: "eq", key: "group", value: "script" },
+    { type: "eq", key: "group", value: "pdf" },
+  ];
+  if (opts.handbookFile) filters.push({ type: "eq", key: "relPath", value: opts.handbookFile });
+  if (opts.rulesFile) filters.push({ type: "eq", key: "relPath", value: opts.rulesFile });
+  return { type: "or" as const, filters };
+}
 
 export async function POST(req: Request) {
   let body: z.infer<typeof ReqSchema>;
@@ -103,144 +100,33 @@ export async function POST(req: Request) {
 
       const run = async () => {
         const startedAt = Date.now();
+        const usableImages = images.filter((img) => img.length <= MAX_IMAGE_DATA_URL_CHARS);
+        const skippedImages = images.length - usableImages.length;
+        if (images.length > 0 && usableImages.length === 0) {
+          send({
+            type: "error",
+            error:
+              "All provided images were too large to process. Please upload smaller screenshots (or paste the text).",
+          });
+          controller.close();
+          return;
+        }
+
         if (process.env.NODE_ENV !== "production") {
           console.log("[/api/chat] start", {
             year,
             handbookFile,
             rulesFile,
             images: images.length,
+            skippedImages,
             fsQuizContext: fsQuizContext?.questionId ?? null,
           });
         }
 
         const client = getOpenAIClient();
         const answerModel = process.env.OPENAI_ANSWER_MODEL || "gpt-4o-mini";
-        const visionModel = process.env.OPENAI_VISION_MODEL || "gpt-4o-mini";
-
-        let visionSummary: string | null = null;
-        let visionKeywords: string[] = [];
-        let visionStatements: string[] = [];
-        let visionSearchQueries: string[] = [];
-
-        if (images.length > 0) {
-          try {
-            const visionParts: ChatCompletionContentPart[] = [
-              {
-                type: "text",
-                text: [
-                  "Extract the statements shown (one per line). Return max 12 statements that the user should judge.",
-                  "Plan search by also returning:",
-                  "- keywords: important words/abbreviations/synonyms (sv/en) that help find the right rule text.",
-                  "- concepts: key concepts (e.g. time slot, finals, penalty, scoring range) without fluff.",
-                  "- searchQueries: 6-12 concrete search phrases (one per line) covering the statements.",
-                ].join("\n"),
-              },
-            ];
-            for (const img of images) {
-              if (img.length > 4_000_000) continue;
-              visionParts.push({
-                type: "image_url",
-                image_url: { url: img, detail: "auto" },
-              });
-            }
-
-            const extracted = await client.chat.completions.parse({
-              model: visionModel,
-              messages: [
-                {
-                  role: "system",
-                  content:
-                    "You read a screenshot from a Formula Student quiz. Extract statements as literally as possible and return search hints. Reply ONLY with the schema.",
-                },
-                { role: "user", content: visionParts },
-              ],
-              response_format: zodResponseFormat(VisionStatementsSchema, "vision_statements"),
-            });
-            const ex = extracted.choices[0]?.message.parsed;
-            if (ex) {
-              visionStatements = (ex.statements ?? []).map((s) => s.trim()).filter(Boolean);
-              visionKeywords = [
-                ...(ex.keywords ?? []).map((k) => k.trim()).filter(Boolean),
-                ...(ex.concepts ?? []).map((c) => c.trim()).filter(Boolean),
-              ];
-              visionSearchQueries = (ex.searchQueries ?? []).map((q) => q.trim()).filter(Boolean);
-            }
-          } catch {
-            // ignore
-          }
-        }
-
-        if (images.length > 0 && question.length === 0) {
-          try {
-            const visionParts: ChatCompletionContentPart[] = [
-              {
-                type: "text",
-                text: "Describe what the images show and extract keywords/phrases for document search (sv/en).",
-              },
-            ];
-            for (const img of images) {
-              if (img.length > 4_000_000) continue;
-              visionParts.push({
-                type: "image_url",
-                image_url: { url: img, detail: "auto" },
-              });
-            }
-
-            const vision = await client.chat.completions.parse({
-              model: visionModel,
-              messages: [
-                {
-                  role: "system",
-                  content:
-                    "You are a vision assistant for a Formula Student knowledge base. Return a short summary and max 12 keywords for search. Reply ONLY with the schema.",
-                },
-                { role: "user", content: visionParts },
-              ],
-              response_format: zodResponseFormat(VisionSchema, "vision"),
-            });
-            const v = vision.choices[0]?.message.parsed;
-            if (v) {
-              visionSummary = v.summary?.trim() || null;
-              visionKeywords = [
-                ...visionKeywords,
-                ...(v.keywords ?? []).map((k) => k.trim()).filter(Boolean),
-              ];
-            }
-          } catch {
-            // ignore
-          }
-        }
-
-        const questionForSearch = question.length > 0 ? question : visionSummary || "image";
-
-        const selection: SyncSelectionParams = {
-          year,
-          handbookFile,
-          rulesFile,
-        };
-
-        const searchInfo = {
-          query: questionForSearch,
-          year,
-          planner: null,
-          plannerKeywords: [],
-          fileNameHints: [],
-          visionSummary,
-          visionKeywords,
-          visionStatementsCount: visionStatements.length,
-          visionSearchQueriesCount: visionSearchQueries.length,
-          scope: "Auto: searches docs when needed",
-          kinds: ["pdf", "text"],
-          retrievedChunks: 0,
-          matchedFiles: [] as string[],
-        };
-
-        send({ type: "meta", searchInfo });
-
         try {
           const vectorStoreId = await getVectorStoreId(client);
-
-          const filters = buildFileSearchFilters(selection);
 
           let answerText = "";
           const fileSearchResults: Array<{
@@ -251,8 +137,9 @@ export async function POST(req: Request) {
             text?: string;
           }> = [];
 
+          const questionForModel = question.length > 0 ? question : "(image only)";
+
           const userPrompt = [
-            `Question: ${questionForSearch}`,
             year ? `Selected year: ${year}` : null,
             handbookFile ? `Selected handbook: ${handbookFile}` : null,
             rulesFile ? `Selected rules: ${rulesFile}` : null,
@@ -266,10 +153,11 @@ export async function POST(req: Request) {
                     : "Correct answer(s): (not provided)",
                 ].join("\n")
               : null,
-            visionStatements.length ? `Statements from image:\n- ${visionStatements.join("\n- ")}` : null,
+            `User message:\n${questionForModel}`,
           ]
             .filter(Boolean)
-            .join("\n\n");
+            .join("\n\n")
+            .trim();
 
           const userContent: Array<
             | { type: "input_text"; text: string }
@@ -278,13 +166,12 @@ export async function POST(req: Request) {
 
           if (fsQuizContext?.imageUrls?.length) {
             for (const url of fsQuizContext.imageUrls.slice(0, 4)) {
-              userContent.push({ type: "input_image", image_url: url, detail: "auto" });
+              userContent.push({ type: "input_image", image_url: url, detail: "low" });
             }
           }
 
-          for (const img of images) {
-            if (img.length > 4_000_000) continue;
-            userContent.push({ type: "input_image", image_url: img, detail: "auto" });
+          for (const img of usableImages) {
+            userContent.push({ type: "input_image", image_url: img, detail: "low" });
           }
 
           const baseParams = {
@@ -295,20 +182,18 @@ export async function POST(req: Request) {
               "- Use headings, bullet lists, and tables where it improves readability.",
               "- For formulas, use LaTeX math (inline $...$ and display $$...$$).",
               "- Keep the final answer clean and structured.",
-              "Try hard to find the correct answer first. If the question is about rules/scoring/penalties/procedures, you SHOULD use file search to look up exact wording before answering.",
-              "If the question is a standalone calculation (e.g., circuits, physics, math) and the answer can be derived from the text/image, do the calculation and give the final numeric result. Do NOT use file search for that.",
-              "If the user is just chatting or asking a follow-up that doesn't require documents, answer WITHOUT file search.",
-              "Always attempt to answer the question (not just summarize sources). If you rely on assumptions, state them explicitly. Never invent rule text or values.",
+              "Always attempt to answer the question (not just summarize sources). If you rely on assumptions, state them explicitly.",
+              "If the question is about rules/scoring/penalties/procedures, use file search to quote exact wording before answering.",
+              "If the question is a standalone calculation (e.g., circuits, physics, math) and the answer can be derived from the text/image, do the calculation yourself and give the final numeric result. Do NOT ask the user to calculate anything.",
+              "If the user is just chatting or asking a follow-up that doesn't require documents, answer without file search.",
+              "Never invent rule text or numeric values.",
               "If FS-Quiz context is provided (question + images + correct answer), use it to answer follow-up questions about that specific question. Do not contradict the provided correct answer; instead explain it.",
-              "If the user provides multiple statements (e.g., in an image), judge each as TRUE/FALSE/UNCLEAR and list the FALSE ones clearly.",
-              "Only say UNCLEAR if you cannot support an answer AFTER searching. In that case, say what exact rule section/paragraph you would need to confirm.",
               "Be concise (prefer <200 words) and quote small excerpts when helpful.",
             ].join("\n"),
-            // Keep client-side history for display, but Responses API memory should use previous_response_id.
             input: [{ role: "user" as const, content: userContent }],
             previous_response_id: previousResponseId,
             include: ["file_search_call.results"] as ResponseIncludable[],
-            max_output_tokens: 650,
+            max_output_tokens: 1200,
             stream: true as const,
             temperature: 0.5,
           };
@@ -319,8 +204,8 @@ export async function POST(req: Request) {
               {
                 type: "file_search",
                 vector_store_ids: [vectorStoreId],
-                filters,
-                max_num_results: 12,
+                filters: buildRestrictedFilters({ handbookFile, rulesFile }),
+                max_num_results: 8,
                 ranking_options: { score_threshold: 0.2 },
               },
             ],
@@ -335,6 +220,13 @@ export async function POST(req: Request) {
               answerText += event.delta;
               send({ type: "delta", text: event.delta });
               continue;
+            }
+            if (event.type === "response.completed") {
+              const responseAny = event.response as unknown;
+              if (responseAny && typeof responseAny === "object" && "usage" in responseAny) {
+                const usage = (responseAny as { usage?: unknown }).usage;
+                if (usage) send({ type: "meta", usage });
+              }
             }
 
             if (event.type === "response.output_item.added" || event.type === "response.output_item.done") {
@@ -380,11 +272,6 @@ export async function POST(req: Request) {
             type: "done",
             answerMarkdown: answerText.trim(),
             sources,
-            searchInfo: {
-              ...searchInfo,
-              retrievedChunks: sources.length,
-              matchedFiles,
-            },
           });
           controller.close();
         } catch (err) {
