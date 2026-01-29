@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { google } from "googleapis";
 import type { drive_v3 } from "googleapis";
+import { loadEnv } from "./load-env";
 
 type ManifestFile = {
   id: string;
@@ -124,6 +125,7 @@ async function downloadFile(drive: drive_v3.Drive, fileId: string, destPath: str
 }
 
 async function main() {
+  loadEnv();
   const { drive, folderId } = await getDriveClient();
   const outDir = rootPath("data", "files");
   await ensureDir(outDir);

@@ -1,7 +1,9 @@
 import OpenAI from "openai";
 import { syncOpenAIFiles } from "../src/lib/openai-file-search";
+import { loadEnv } from "./load-env";
 
 async function main() {
+  loadEnv();
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     console.error("Missing OPENAI_API_KEY.");

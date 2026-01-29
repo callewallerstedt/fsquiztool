@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import OpenAI from "openai";
+import { loadEnv } from "./load-env";
 
 type SyncEntry = {
   vectorStoreFileId: string;
@@ -46,9 +47,15 @@ function bestCandidate(files: VectorStoreFileLite[]) {
 }
 
 async function main() {
+  loadEnv();
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   const vectorStoreId = process.env.OPENAI_VECTOR_STORE_ID?.trim();
-  const dryRun = process.argv.includes("--dry-run");
+  const apply = process.argv.includes("--apply");
+  const dryRun = !apply || process.argv.includes("--dry-run");
+  if (apply && process.argv.includes("--dry-run")) {
+    console.error("Use either --apply or --dry-run (not both).");
+    process.exit(1);
+  }
 
   if (!apiKey) {
     console.error("Missing OPENAI_API_KEY.");
@@ -127,4 +134,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-

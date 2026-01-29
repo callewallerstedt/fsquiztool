@@ -38,6 +38,12 @@ If your vector store got duplicates (same file uploaded multiple times), you can
 npm run openai:dedupe
 ```
 
+This defaults to a dry-run (prints what would be removed). To actually delete duplicates:
+
+```bash
+npm run openai:dedupe -- --apply
+```
+
 4) Run
 
 ```bash
