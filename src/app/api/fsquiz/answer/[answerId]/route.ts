@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 export const runtime = "nodejs";
+export const maxDuration = 30;
 
 const ParamsSchema = z.object({
   answerId: z.coerce.number().int().min(0).max(1_000_000),

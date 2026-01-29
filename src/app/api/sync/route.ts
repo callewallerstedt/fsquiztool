@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 function statePath() {
   return path.join(process.cwd(), "data", "openai-sync.json");

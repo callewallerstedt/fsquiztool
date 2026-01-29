@@ -5,6 +5,7 @@ import { getOpenAIClient } from "@/lib/openai";
 import { getVectorStoreId } from "@/lib/openai-file-search";
 
 export const runtime = "nodejs";
+export const maxDuration = 30;
 
 type Option = { fileName: string; label: string };
 

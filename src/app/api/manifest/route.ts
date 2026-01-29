@@ -3,6 +3,9 @@ import { listAvailablePdfYears, listLocalEligibleFiles } from "@/lib/openai-file
 import { getOpenAIClient } from "@/lib/openai";
 import { getVectorStoreId } from "@/lib/openai-file-search";
 
+export const runtime = "nodejs";
+export const maxDuration = 30;
+
 export async function GET() {
   const apiKeyOk = Boolean(process.env.OPENAI_API_KEY);
   const locals = await listLocalEligibleFiles();

@@ -11,6 +11,7 @@ import {
 } from "@/lib/openai-file-search";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const ReqSchema = z
   .object({
