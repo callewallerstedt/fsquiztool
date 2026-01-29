@@ -10,7 +10,8 @@
     "lint": "eslint",
     "docs:sync": "tsx scripts/sync-drive.ts",
     "docs:index": "tsx scripts/build-index.ts",
-    "openai:sync": "tsx scripts/sync-openai.ts"
+    "openai:sync": "tsx scripts/sync-openai.ts",
+    "openai:dedupe": "tsx scripts/dedupe-vector-store.ts"
   },
   "dependencies": {
     "googleapis": "^170.1.0",

@@ -32,6 +32,12 @@ npm run openai:sync
 
 Copy the printed `vectorStoreId` into `OPENAI_VECTOR_STORE_ID` so you can reuse it locally + on Vercel.
 
+If your vector store got duplicates (same file uploaded multiple times), you can clean it up with:
+
+```bash
+npm run openai:dedupe
+```
+
 4) Run
 
 ```bash
@@ -56,4 +62,3 @@ npm run dev
 Notes:
 - This repo does **not** commit `data/files/` (PDFs). Vercel uses the vector store for year/handbook/rules selection and file search.
 - `/api/sync` is disabled in production; do syncing locally via `npm run openai:sync`.
-
