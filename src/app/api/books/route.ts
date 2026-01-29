@@ -72,8 +72,8 @@ async function listFromVectorStore(year: string) {
   const client = getOpenAIClient();
   const vectorStoreId = await getVectorStoreId(client);
 
-  const handbooks: Option[] = [];
-  const rules: Option[] = [];
+  const handbooksByPath = new Map<string, Option>();
+  const rulesByPath = new Map<string, Option>();
 
   for await (const f of client.vectorStores.files.list(vectorStoreId, { limit: 100, filter: "completed" })) {
     const attrs = f.attributes ?? null;
@@ -85,14 +85,20 @@ async function listFromVectorStore(year: string) {
     if (ext !== "pdf" || fileYear !== year || !relPath) continue;
 
     if (group === "handbook") {
-      handbooks.push({ fileName: relPath, label: cleanLabel(relPath) });
+      if (!handbooksByPath.has(relPath)) {
+        handbooksByPath.set(relPath, { fileName: relPath, label: cleanLabel(relPath) });
+      }
       continue;
     }
     if (group === "rules") {
-      rules.push({ fileName: relPath, label: cleanLabel(relPath) });
+      if (!rulesByPath.has(relPath)) {
+        rulesByPath.set(relPath, { fileName: relPath, label: cleanLabel(relPath) });
+      }
     }
   }
 
+  const handbooks = Array.from(handbooksByPath.values());
+  const rules = Array.from(rulesByPath.values());
   handbooks.sort((a, b) => a.label.localeCompare(b.label));
   rules.sort((a, b) => a.label.localeCompare(b.label));
   return { handbooks, rules };

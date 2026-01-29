@@ -418,10 +418,19 @@ export default function Home() {
           setBooksError(("error" in data && data.error) || "Could not load handbooks/rules.");
           return;
         }
-        setHandbookOptions(data.handbooks ?? []);
-        setRulesOptions(data.rules ?? []);
-        setHandbookFile(data.handbooks?.[0]?.fileName ?? "");
-        setRulesFile(data.rules?.[0]?.fileName ?? "");
+        const dedupe = (opts: BookOption[]) => {
+          const byFile = new Map<string, BookOption>();
+          for (const o of opts) {
+            if (!byFile.has(o.fileName)) byFile.set(o.fileName, o);
+          }
+          return Array.from(byFile.values());
+        };
+        const handbooks = dedupe(data.handbooks ?? []);
+        const rules = dedupe(data.rules ?? []);
+        setHandbookOptions(handbooks);
+        setRulesOptions(rules);
+        setHandbookFile(handbooks[0]?.fileName ?? "");
+        setRulesFile(rules[0]?.fileName ?? "");
       } catch (e) {
         setBooksError(e instanceof Error ? e.message : "Could not load handbooks/rules.");
       } finally {
